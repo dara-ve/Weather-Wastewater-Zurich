@@ -125,3 +125,7 @@ The weather data were downloaded from the Ostluft website using their data selec
 
 - Nina Balmer
 - Dara Velkov
+
+## Contributions
+
+Both authors contributed equally to the project. The work was carried out collaboratively, including data preparation, exploratory data analysis, statistical modelling, visualisation, interpretation of results, and documentation.
