@@ -1,0 +1,1993 @@
+---
+title: "Weather Effects on Wastewater Viral Load in Zurich"
+author: "Nina Balmer and Dara Velkov"
+date: "19 February 2026"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      message = FALSE,
+                      warning = FALSE)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(janitor)
+library(lubridate)
+library(readxl)
+library(tidyr)
+library(scales)
+library(zoo)
+library(plotly)
+```
+
+---
+# Introduction
+
+This report analyses viral concentrations measured in Zurich’s wastewater and examines whether weather conditions influence the detected viral load. 
+
+Wastewater-based epidemiology has become an important tool for public health monitoring. It allows researchers to detect viral circulation at the population level, independent of individual testing behaviour. Previous research has shown that wastewater analysis can provide valuable insights into flu seasons and may even serve as an early warning system for infectious disease outbreaks (Eawag, n.d.). Based on this idea, this project explores whether short-term weather conditions are related to changes in the measured wastewater viral load for those four respiratory viruses: 
+
+- SARS-CoV-2
+- Influenza A
+- Influenza B
+- Respiratory Syncytial Virus (RSV)
+
+The selection was data-driven. These four viruses are the respiratory targets that are systematically monitored and publicly available in the Swiss Federal Office of Public Health (FOPH) wastewater dataset. No additional virus targets were included because no comparable data were available for the observation period.
+
+In particular, we examine whether air temperature and rain duration are associated with wastewater viral load. There are plausible mechanisms for such relationships. For example, higher temperatures may affect viral stability, and heavy rainfall could dilute wastewater concentrations. Such effects could influence how epidemiological trends are interpreted.
+
+The analysis is based on two years of data from 19 January 2024 to 19 January 2026. Wastewater viral measurements for Zurich were combined with daily weather data from the Ostluft open data platform. After cleaning and merging both datasets, the combined data serve as the basis for the analysis. The analysis was restricted to Zurich because continuous and complete wastewater measurements were available for this region over the full observation period.
+
+The goal of this study is to examine seasonal patterns, explore potential weather associations, and provide a structured interpretation of viral dynamics. Rather than building a formal forecasting model, the project focuses on explanatory analysis and scenario-based outlooks derived from observed onset patterns.
+
+# Analytical Strategy
+
+This project follows an exploratory analysis approach. First, we use descriptive analyses to understand seasonal patterns and fluctuations in wastewater viral load for the different virus targets. The goal is to identify general time structures and differences between the viruses.
+
+Second, we examine weather conditions. We use exploratory weather plots and lagged scatter plots to check whether short-term changes in temperature and rain duration are related to viral load. These analyses are descriptive and are not intended to show causality.
+
+After that, we apply a model-based approach to better control for seasonality and long-term trends. We use Generalized Additive Models (GAMs) to separate long-term temporal patterns from short-term weather-related effects and to examine whether weather has an additional influence within the seasonal structure.
+
+Finally, to provide an outlook, we do not build a common forecasting model. Instead, we use found onset patterns to identify plausible time windows when new virus waves could potentially start. This approach allows us to give a structured forward-looking perspective without claiming exact predictions.
+
+Overall, the project is explanatory and scenario-based. Since the dataset only covers two years, we do not build a formal forecasting model but focus on structured interpretation of observed patterns.
+
+# Data and Preprocessing
+
+## Used Data Sources
+
+This analysis is based on datasets from two main sources. The dataset on wastewater viral load was obtained from the FOPH via the Open Data Portal Switzerland (Open Data Portal Switzerland, n.d.). It contains measurements of viral concentrations in wastewater and serves as the basis for analyzing temporal trends in viral load.
+
+Weather data, including temperature and rainfall duration were retrieved from the open data platform Ostluft (Ostluft, n.d.). The platform allows users to preselect required data, so two separate Excel files were generated and later combined. Because temperature and rainfall duration were in different units, it was easier to extract them separately from the Ostluft website, convert each one individually, and then merge them.
+
+All datasets were aligned to enable analysis of the relationship between weather conditions and viral load in wastewater.
+
+## Load and clean datasets
+
+### wastewater data
+
+The wastewater dataset `RESPVIRUSES_wastewater.csv` is uploaded. Then the column names were standardized to make them consistent and easier to read. The temporal column was renamed to `date` so it can later be merged with the weather dataset. Unnecessary metadata columns were also removed.
+
+> Note on File Path / Working Directory:  
+> Before proceeding, it is assumed that the R Markdown file is located in the folder
+> `scripts/` and the dataset is stored in the project folder `data/`.
+> Therefore, the dataset  is loaded using the relative path
+> `../data/RESPVIRUSES_wastewater.csv`.
+
+```{r load-clean-wastewater, echo=FALSE}
+wastewater_df <- read_csv("../data/RESPVIRUSES_wastewater.csv") %>%
+  clean_names() %>%
+  rename(date = temporal) %>%
+  select(-temporal_type, -georegion1_type, -georegion2_type)
+```
+
+Afterwards, the dataset was filtered to include only observations from Zurich (`georegion1 == "ZH"`) and only needed observations between 19 January 2024 and 19 January 2026 were kept.
+
+```{r filter-zurich-timewindow, include = FALSE}
+wastewater_zh_df <- wastewater_df %>%
+  filter(georegion1 == "ZH") %>%
+  filter(date >= as.Date("2024-01-19"),
+         date <= as.Date("2026-01-19"))
+
+head(wastewater_zh_df)
+
+# double check the selected date range
+range(wastewater_zh_df$date, na.rm = TRUE)
+```
+
+### Missingness analysis
+
+#### Missingness summary per virus target (value_category) {#missingness-summary}
+
+The quality and completeness of the wastewater dataset were checked by analyzing missing values (NA). Missing values were calculated separately for the raw measurements (`value`) and for the 7-day rolling mean (`value_mean7d`).
+
+The analysis was done for each virus target (`value_category`). Missing values were summarized as absolute numbers and as percentages.
+
+```{r missingness-summary}
+missing_summary <- wastewater_zh_df %>%
+  mutate(
+    value_category = recode(
+      value_category,
+      "influenza_a"                 = "Influenza A",
+      "influenza_b"                 = "Influenza B",
+      "respiratory_syncytial_virus" = "RSV",
+      "sars-cov-2"                  = "SARS-CoV-2"
+    )
+  ) %>%
+  group_by(value_category) %>%
+  summarise(
+    n = n(),
+    n_missing_value = sum(is.na(value)),
+    percentage_missing_value = round(100 * n_missing_value / n, 1),
+    n_missing_mean7d = sum(is.na(value_mean7d)),
+    percentage_missing_mean7d = round(100 * n_missing_mean7d / n, 1)
+  ) %>%
+  ungroup()
+
+missing_summary %>%
+  select(
+    value_category,
+    percentage_missing_value,
+    percentage_missing_mean7d
+  ) %>%
+  knitr::kable()
+```
+
+The results show that many raw measurements are missing. Around 44% of the values in `value` are NA. In contrast, only about 6% of the values in the 7-day rolling mean (`value_mean7d`) are missing. For this reason, the 7-day rolling mean is used for further analyses. It provides a more complete time series and reduces short-term variation caused by measurement noise or irregular sampling.
+
+#### Missingness alignment across virus targets (same-day missingness)
+
+In a second step we checked whether missing values in `value_mean7d` occur on the same dates for all virus targets. This helps to understand whether the missing data is caused by general issues, such as missing sampling days, or by problems related to specific virus targets.
+
+```{r missingness-same-day-summary}
+missingness_same_day_summary <- wastewater_zh_df %>%
+  group_by(date) %>%
+  summarise(
+    n_targets = n(),
+    n_missing_mean7d = sum(is.na(value_mean7d))
+  ) %>%
+  ungroup() %>%
+  summarise(
+    days_total = n(),
+    days_any_missing = sum(n_missing_mean7d > 0),
+    days_all_missing = sum(n_missing_mean7d == n_targets)
+  )
+
+missingness_same_day_summary %>%
+  knitr::kable()
+
+```
+
+We see that `days_any_missing` equals `days_all_missing`. So the analysis shows that missing values always occur on the same days for all virus targets. The number of days with any missing values is the same as the number of days where all virus targets are missing. 
+This means the missing data is likely due to overall system reasons and not related to one specific virus.
+
+Based on these results, all observations with missing values in `value_mean7d` were removed to avoid gaps in the time series. Also all zero values were kept because they can represent very low or below-detection concentrations and can still contain useful information.
+
+```{r filter_non_missing_mean7d}
+wastewater_zh_clean <- wastewater_zh_df %>%
+  filter(!is.na(value_mean7d))
+```
+
+**Interpretation**
+
+Because the missing values happen on the same days for all viruses, it looks like this is due to general system reasons and not because of one specific virus. So when we remove days with missing values in the 7-day mean, we do not treat one virus differently than the others. It just helps to keep the time series complete and comparable for the next analyses.
+
+### Ostluft data (Temperature and Rain Duration)
+
+On the Ostluft platform, we downloaded hourly rain duration and temperature data for several streets in Zurich. We then cleaned and processed the data to create daily Zurich-wide average values.
+
+**Rain duration:**
+
+The Hourly measurements for rain duration were cleaned by removing metadata, renaming columns and converting minutes to hours. These values were then aggregated to daily totals per station and reshaped to long format. The resulting dataset is `rain_long`.
+
+```{r load-clean-rain-duration, echo=FALSE}
+rain_measurements_df <- read_excel(
+  "../data/OSTLUFT_Rain_duration_Measurements_2023-2026.xlsx",
+  sheet = 1
+) %>%
+  slice(-1:-3) %>%   # remove metadata rows
+  rename(
+    Start_Time = Startzeit,
+    End_Time   = Endzeit
+  ) %>%
+  mutate(
+    Date = as.Date(Start_Time),
+    # values are minutes of rain per hour -> convert to hours
+    across(starts_with("Zürich"), ~ as.numeric(.x) / 60)
+  )
+
+# aggregate hourly rain duration to daily totals (hours per day) per station
+rain_daily <- rain_measurements_df %>%
+  group_by(Date) %>%
+  summarise(
+    across(starts_with("Zürich"), sum, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# convert to long format (one row per day and station)
+rain_long <- rain_daily %>%
+  pivot_longer(
+    cols = starts_with("Zürich"),
+    names_to  = "Street",
+    values_to = "Rain_Duration"
+  )
+```
+
+**Temperature:**
+
+The temperature dataset includes daily mean, minimum, and maximum temperature values for each street in Zurich. The first rows of the file contain metadata, such as the street names and the type of measurement. To keep this information, we read the Excel file without predefined column names. Then we extracted the street names and measurement types, created standardized column names, converted the timestamps into dates, and reshaped the data into long format. The final dataset is called `temp_df_long`.
+
+```{r load-clean-temperature-data, echo=FALSE}
+
+# read file without column names to preserve metadata
+raw <- read_excel(
+  "../data/OSTLUFT_Temperature_Measurements_2023-2026.xlsx",
+  sheet = 1,
+  col_names = FALSE
+)
+
+# extract metadata rows
+street_row <- as.character(raw[1, ])
+type_row   <- as.character(raw[2, ])
+
+# remove metadata rows from data
+data <- raw[-c(1:4), ]
+
+# reconstruct column names
+new_names <- c("Start_Time", "End_Time")
+
+for (i in 3:length(street_row)) {
+  metric <- if (type_row[i] == "Lufttemperatur") {
+    "Temperature"
+  } else if (grepl("tiefstes", type_row[i])) {
+    "Tmin"
+  } else if (grepl("höchstes", type_row[i])) {
+    "Tmax"
+  } else {
+    NA
+  }
+  new_names <- c(new_names, paste(street_row[i], metric, sep = " | "))
+}
+
+colnames(data) <- new_names
+
+# reshape to tidy format
+temp_long <- data %>%
+  mutate(
+    Date = as.Date(as.numeric(Start_Time), origin = "1899-12-30")
+  ) %>%
+  pivot_longer(
+    cols = -c(Start_Time, End_Time, Date),
+    names_to = "Street_Metric",
+    values_to = "Value"
+  ) %>%
+  separate(
+    Street_Metric,
+    into = c("Street", "Metric"),
+    sep = " \\| "
+  )
+
+temp_df_long <- temp_long %>%
+  pivot_wider(
+    names_from = Metric,
+    values_from = Value
+  ) %>%
+  select(Date, Street, Temperature, Tmin, Tmax)
+```
+
+**Joining rain and temperature datasets**
+
+The rain and temperature datasets are joined by `Date` and `Street`. Afterwards, the measurements from all monitoring stations were aggregated to one Zurich-wide daily average per variable.
+
+```{r join-rain-temperature, echo=FALSE}
+rain_temp_joined_df <- rain_long %>%
+  left_join(
+    temp_df_long,
+    by = c("Date", "Street")
+  )
+```
+
+In a second step the `Street` variables were no longer needed, so we regrouped the set.
+
+```{r clean-join-rain-temperature, echo=FALSE}
+final_rain_temp_df <- rain_temp_joined_df %>%
+  mutate(
+    Rain_Duration = as.numeric(Rain_Duration),
+    Temperature   = as.numeric(Temperature),
+    Tmin          = as.numeric(Tmin),
+    Tmax          = as.numeric(Tmax)
+  ) %>%
+  group_by(Date) %>%
+  summarise(
+    Rain_Duration = mean(Rain_Duration, na.rm = TRUE),
+    Temperature   = mean(Temperature, na.rm = TRUE),
+    Tmin          = mean(Tmin, na.rm = TRUE),
+    Tmax          = mean(Tmax, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  clean_names()
+```
+
+The resulting dataset `final_rain_temp_df` contains daily averages for rain duration and temperature in Zurich and is ready to be merged with the wasterwater dataset.
+
+## Joining the datasets
+
+For merging, the two preprocessed datasets `wastewater_zh_clean` and `final_rain_temp_df` are joined using the common time variable (`date`). The dataset `wastewater_zh_clean` is used as the reference dataset because observations  with missing viral load values were already removed. This ensures that only valid and complete  measurements are included.
+
+We used a left join to keep all wastewater data and add the corresponding weather variables (`final_rain_temp_df`). The resulting dataset is now ready for the next statistical analysis steps.
+
+```{r join-wastewater-weather, echo = TRUE}
+# join wastewater and weather data by date
+final_dataset_analysis <- wastewater_zh_clean %>%
+  left_join(
+    final_rain_temp_df,
+    by = "date"
+  )
+```
+
+The resulting dataset named `final_dataset_analysis` includes daily viral load data for each virus together with the matching daily weather information for Zurich.
+
+**wastewater-related variables include:**
+
+- virus target identifier (`value_category`)
+
+- viral load measurements (`value`)
+
+- 7-day rolling mean of viral load (`value_mean7d`)
+
+- additional derived indicators such as percentiles, trends, delays, and data completeness flags
+  (e.g. `value_percentile7d`, `value_percentile_mean7d`, `trend`, `delay7d`, `data_complete`)
+
+- contextual variables such as wastewater flow (`flow`), concentration (`conc`), and population size (`pop`)
+
+- geographic identifiers (`georegion1`, `georegion2`)
+
+**Weather-related variables (daily Zurich-wide averages):**
+
+- Rain duration (`rain_duration`)
+
+- Mean Temperature (`temperature`)
+
+- Temperature minimum value (`tmin`)
+
+- Temperature maximum value (`tmax`)
+
+# Analyses
+
+## Viral load over time by virus target (7-day mean)
+
+To analyze temporal patterns in viral load we plot the 7-day rolling mean over time for each virus target (`value_category`).
+
+Before plotting, we prepared the data as follows:
+
+- The missing values (`NA`) in `value_mean7d` were removed using `filter(!is.na(value_mean7d))` to avoid gaps in the time series
+- Zero values were retained because they can reflect very low or below-detection concentrations and are therefore still informative
+
+### Why use a square-root transformation?
+
+wastewater viral load values can vary a lot, especially during outbreak periods when strong peaks appear. On the original scale, these high peaks dominate the y-axis, so smaller changes are difficult to see. Therefore, we apply a square root transformation to the 7-day rolling mean values: `y = sqrt(value_mean7d)`.
+
+The square root transformation reduces high values more strongly than low values. This makes it easier to see changes during periods with lower viral load. Zero values stay the same, because `sqrt(0) = 0`), so we do not lose any observations.
+
+We did not use a logarithmic transformation because the data contain many zero values. With a log transformation, we would need extra adjustments. The square root transformation keeps the zero values and makes the variation more stable, while the results are still easy to read.
+
+```{r viral-load-facet-plot, fig.width=11, fig.height=6.5, dpi=300}
+
+wastewater_zh_clean_named <- wastewater_zh_clean %>%
+  mutate(
+    value_category = recode(
+      value_category,
+      "influenza_a"                 = "Influenza A",
+      "influenza_b"                 = "Influenza B",
+      "respiratory_syncytial_virus" = "RSV",
+      "sars-cov-2"                  = "SARS-CoV-2"
+    )
+  )
+
+ggplot(
+  wastewater_zh_clean_named,
+  aes(x = date, y = sqrt(value_mean7d), color = value_category)
+) +
+  geom_line(linewidth = 0.95, alpha = 0.95) +
+  facet_wrap(
+    ~ value_category,
+    scales = "free_y",
+    ncol = 2,
+    axes = "all"
+  ) +
+  scale_color_brewer(palette = "Dark2", guide = "none") +
+  scale_x_date(
+    date_breaks = "3 months",
+    date_labels = "%b %Y",
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  labs(
+    title = "Wastewater viral load over time by virus target (7-day mean)",
+    subtitle = "Values shown as sqrt(value_mean7d) for readability",
+    x = NULL,
+    y = expression(sqrt("value_mean7d"))
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    strip.text = element_text(face = "bold"),
+    strip.background = element_rect(fill = "grey92", color = NA),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.spacing = unit(1.0, "lines")
+  )
+```
+
+**Interpretation**
+
+The faceted time series plot shows how viral load changes over time for the four respiratory viruses in Zurich.
+
+- **Influenza A** shows a clear seasonal pattern. Viral load is high at the beginning of 2024 and decreases during spring and summer 2024. It increases again in winter 2024/2025, with a clear peak in early 2025. Towards the end of 2025 and the beginning of 2026, viral load rises again, which is typical for influenza seasons.
+
+- **Influenza B**  shows one clear winter peak around early 2025. After this peak, the viral load decreases strongly in 2025. Outside this winter period, values remain low, which indicates a shorter and more limited circulation compared to Influenza A.
+
+- **Respiratory Syncytial Virus (RSV)** shows a similar seasonal pattern, with low values during warmer months and higher values in winter. An increase is visible during winter 2024/2025 and again towards the end of 2025. However, RSV has lower viral load values compared to the other viruses over the whole time period.
+
+- **SARS-CoV-2** shows higher viral load values than the other viruses throughout the observation period. A strong peak is visible in late 2024, followed by a decrease in early 2025. Viral load increases again later in 2025, but these peaks are smaller than the peak in late 2024.
+
+Overall, Influenza A, Influenza B, and RSV show clear winter-related increases, while SARS-CoV-2 remains present over a longer period with several peaks.
+
+## Seasonal comparison: Summer vs Winter
+
+To compare seasonal wastewater viral load between summer and winter, we classify observations into seasons based on the month: Winter is the months from December to February; Summer is the months from June to August. We visualize the distribution using box plots.
+
+```{r season-boxplot, fig.width=11, fig.height=6.5, dpi=300}
+
+wastewater_season_df <- wastewater_zh_clean %>%
+  mutate(
+    value_category = recode(
+      value_category,
+      "influenza_a"                 = "Influenza A",
+      "influenza_b"                 = "Influenza B",
+      "respiratory_syncytial_virus" = "RSV",
+      "sars-cov-2"                  = "SARS-CoV-2"
+    ),
+    month = month(date),
+    season = case_when(
+      month %in% c(12, 1, 2) ~ "Winter",
+      month %in% c(6, 7, 8)  ~ "Summer",
+      TRUE ~ NA_character_
+    ),
+    season = factor(season, levels = c("Winter", "Summer"))
+  ) %>%
+  filter(!is.na(season))
+
+ggplot(
+  wastewater_season_df,
+  aes(x = season, y = sqrt(value_mean7d), fill = season)
+) +
+  geom_boxplot(
+    width = 0.6,
+    alpha = 0.85,
+    linewidth = 0.6,
+    outlier.alpha = 0.25,
+    outlier.size = 1.2
+  ) +
+  facet_wrap(
+    ~ value_category,
+    scales = "free_y",
+    ncol = 2,
+    axes = "all"
+  ) +
+  scale_fill_brewer(palette = "Set2", guide = "none") +
+  labs(
+    title = "wastewater viral load in winter vs summer (7-day mean)",
+    subtitle = "Distribution of sqrt-transformed 7-day mean viral load",
+    x = "Season",
+    y = expression(sqrt("value_mean7d"))
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    strip.text = element_text(face = "bold"),
+    strip.background = element_rect(fill = "grey92", color = NA),
+    axis.text.x = element_text(face = "bold"),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    panel.spacing = unit(1, "lines")
+  )
+```
+
+**Interpretation (Summer vs Winter boxplots)**
+
+The box plots compare the distribution of wastewater viral load (7-day rolling mean, square-root transformed) between winter and summer seasons for each virus target across multiple years.
+
+> It is important to note that these box plots include data from several years 
+> (from 19 January 2024 to 19 January 2026). So the differences between winter and summer come
+> from both seasonal changes and differences between  the years. 
+> The plots are not meant to compare single winters, but to show general seasonal differences.
+
+The box plots do not show only one specific winter or one specific summer. It combines several years. This means that the variation in the plots comes from both seasonal differences and differences between years.
+
+- **Influenza A** clearly shows higher viral load in winter compared to summer. The median line is much higher in winter, which indicates strong seasonality.
+
+- **Influenza B** shows higher viral load in winter with more variation during the winter months compared to summer. The median is lower compared to Influenza A, but the values do spread more. This means Influenza B circulates in winter, but the strength of the peaks changes more.
+
+- **RSV** shows a clear seasonal pattern similar to the influenza viruses, with much higher viral loads in winter and consistently low levels in summer. The winter season also appears to be slightly shorter compared to the other viral loads.
+
+- **SARS-CoV-2** shows a different pattern compared to the other viruses. Viral load is high in both seasons and even slightly higher in summer. This suggests that SARS-CoV-2 is less seasonal in this dataset and continues to circulate outside the winter months.
+
+Overall, the comparison shows that Influenza A, Influenza B, and RSV are clearly higher in winter. In contrast, SARS-CoV-2 is present in both seasons and does not follow such a strict winter pattern.
+
+To look more closely at SARS-CoV-2, we now compare different winter and summer periods separately. This allows us to see whether seasonal patterns are stable across different years.
+
+```{r covid-season-year-compare, fig.width=10, fig.height=5, dpi=300}
+# Compare SARS-CoV-2 across different winters and summers
+# Winters are defined as Dec–Feb and labeled by season-year (e.g., Winter 2024/2025).
+# Summers are Jun–Aug and labeled by calendar year (e.g., Summer 2024).
+
+covid_season_year_df <- wastewater_zh_clean %>%
+  filter(value_category == "sars-cov-2") %>%
+  mutate(
+    month = month(date),
+    year  = year(date),
+    season_year = case_when(
+      month == 12           ~ paste0("Winter ", year, "/", year + 1),
+      month %in% c(1, 2)    ~ paste0("Winter ", year - 1, "/", year),
+      month %in% c(6, 7, 8) ~ paste0("Summer ", year),
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(season_year)) %>%
+  mutate(
+    # useful for consistent color mapping:
+    season = if_else(grepl("^Winter", season_year), "Winter", "Summer"),
+    season = factor(season, levels = c("Winter", "Summer")),
+
+    # order labels chronologically
+    season_year = factor(
+      season_year,
+      levels = c(
+        "Winter 2023/2024", "Summer 2024",
+        "Winter 2024/2025", "Summer 2025",
+        "Winter 2025/2026"
+      )
+    )
+  )
+
+ggplot(covid_season_year_df, aes(x = season_year, y = sqrt(value_mean7d), fill = season)) +
+  geom_boxplot(
+    width = 0.6,
+    alpha = 0.85,
+    linewidth = 0.6,
+    outlier.alpha = 0.25,
+    outlier.size = 1.2
+  ) +
+  scale_fill_brewer(palette = "Set2", guide = "none") +
+  labs(
+    title = "SARS-CoV-2 wastewater viral load by season period (Zurich, 7-day mean)",
+    subtitle = "Distribution of sqrt-transformed 7-day mean viral load",
+    x = "Season period",
+    y = expression(sqrt("value_mean7d"))
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    axis.text.y = element_text(color = "grey20")
+  )
+
+
+```
+
+**Interpretation (SARS-CoV-2 seasonal periods)**
+
+The box plot shows SARS-CoV-2 viral load using the `y = sqrt(value_mean7d)` value across different season periods in Zurich. Overall, the results show that SARS-CoV-2 does not follow a very clear winter pattern and changes a lot between years.
+
+- **Winter 2023/2024** looks moderate overall but it has some high outliers. Since this winter is only partially covered by the dataset, as it starts on 19 January 2024. The results for this period should be interpreted carefully.
+
+- **Summer 2024** shows the highest median and overall higher values compared to the other periods. This means SARS-CoV-2 was strongly circulating in this summer.
+
+- **Winter 2024/2025** has a lower median than Summer 2024. This suggests that this winter was less intense than the previous summer. However, the values still vary a lot.
+
+- **Summer 2025** is lower and more stable compared to Summer 2024. This indicates a weaker summer wave in 2025.
+
+- **Winter 2025/2026** shows a higher median again compared to Summer 2025 and Winter 2024/2025. This suggests stronger activity towards the end of the observation period.
+
+Overall, SARS-CoV-2 does not show a strictly seasonal pattern in this dataset. Instead, the results suggest substantial circulation in both winter and summer, with strong differences in magnitude between years (e.g., Summer 2024 being markedly higher than Summer 2025).
+
+Next, we apply the same seasonal comparison to Influenza A.
+This helps us to check whether the winter pattern is consistent across different years.
+
+```{r influenza-a-season-year-compare, fig.width=10, fig.height=5, dpi=300}
+
+influenza_a_season_year_df <- wastewater_zh_clean %>%
+  filter(value_category == "influenza_a") %>%
+  mutate(
+    month = month(date),
+    year  = year(date),
+    season_year = case_when(
+      # Winter spans two years: Dec belongs to Winter Y/(Y+1), Jan-Feb belong to Winter (Y-1)/Y
+      month == 12           ~ paste0("Winter ", year, "/", year + 1),
+      month %in% c(1, 2)    ~ paste0("Winter ", year - 1, "/", year),
+      # Summer within one calendar year
+      month %in% c(6, 7, 8) ~ paste0("Summer ", year),
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(season_year)) %>%
+  mutate(
+    season_year = factor(
+      season_year,
+      levels = c(
+        "Winter 2023/2024", "Summer 2024",
+        "Winter 2024/2025", "Summer 2025",
+        "Winter 2025/2026"
+      )
+    ),
+    # same color mapping as before (Winter vs Summer)
+    season = if_else(grepl("^Winter", season_year), "Winter", "Summer"),
+    season = factor(season, levels = c("Winter", "Summer"))
+  )
+
+ggplot(influenza_a_season_year_df, aes(x = season_year, y = sqrt(value_mean7d), fill = season)) +
+  geom_boxplot(
+    width = 0.6,
+    alpha = 0.85,
+    linewidth = 0.6,
+    outlier.alpha = 0.25,
+    outlier.size = 1.2
+  ) +
+  scale_fill_brewer(palette = "Set2", guide = "none") +
+  labs(
+    title = "Influenza A wastewater viral load by season period (Zurich, 7-day mean)",
+    subtitle = "Distribution of sqrt-transformed 7-day mean viral load",
+    x = "Season period",
+    y = expression(sqrt("value_mean7d"))
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    axis.text.x = element_text(angle = 30, hjust = 1, face = "bold"),
+    axis.text.y = element_text(color = "grey20")
+  )
+
+```
+
+**Interpretation (Influenza A seasonal periods)**
+
+The box plot shows Influenza A viral load (7-day rolling mean, square-root transformed) for different winter and summer periods in Zurich. Overall, we can clearly see a strong seasonal pattern, with much higher values in winter than in summer.
+
+- **Winter 2023/2024** shows high viral load with a wide spread. This means Influenza A activity was strong during this winter, even though this period is only partly covered in the dataset.
+
+- **Summer 2024** shows very low viral load and little variation. This suggests almost no Influenza A circulation during summer.
+
+- **Winter 2024/2025** again shows high values and a wide spread, similar to the previous winter. This indicates another strong winter wave.
+
+- **Summer 2025** remains at very low levels, even slightly lower than Summer 2024. This means almost no Influenza A activity in summer.
+
+- **Winter 2025/2026** again shows high viral load, with a slightly higher median than the previous winters, suggesting another strong winter season.
+
+The results show a clear seasonal pattern for Influenza A viral load. The winter periods have much higher values than the summer periods. There is some variation between different winters, but all winters show similarly high levels. In contrast, summer viral loads are consistently low and stable. 
+
+Overall, Influenza A clearly follows a winter pattern.
+
+## Exploratory Analysis: Weather Conditions in Zurich
+
+In this section, we show exploratory plots of temperature and rain duration based on daily Zurich-wide measurements from Ostluft. The goal is to examine the data quality, explore seasonal patterns, and check whether we find possible relationships between the weather variables.
+
+### Daily Average Temperature over Time
+
+The following figure shows the daily average temperature in Zurich over the whole observation period. To reduce short-term fluctuations and make the seasonal pattern more visible, we added a 30-day rolling mean (`temp_30d`) to the daily values. This helps to check whether the temperature follows the expected seasonal cycle and whether the data looks plausible.
+
+```{r plot-temperature-over-time-smoothed, echo=FALSE, fig.width=10, fig.height=4.5, dpi=300}
+
+temp_plot_df <- final_rain_temp_df %>%
+  arrange(date) %>%
+  mutate(temp_30d = zoo::rollmean(temperature, k = 30, fill = NA, align = "center"))
+
+ggplot(temp_plot_df, aes(x = date)) +
+  geom_line(aes(y = temperature), color = "grey80", linewidth = 0.35) +
+  geom_line(aes(y = temp_30d), color = "#de2d26", linewidth = 1.05) +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b %Y") +
+  labs(
+    title = "Daily Average Temperature in Zurich",
+    subtitle = "Daily observations with 30-day rolling mean",
+    x = NULL,
+    y = "Temperature (°C)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+### Daily Mean Rain Duration over Time
+
+The following figure shows the daily mean rain duration in Zurich, averaged across all monitoring stations, over the observation period. The daily values change a lot and sometimes show strong peaks, which reflect individual rainfall events. To make the general pattern easier to see, we added a 30-day rolling mean (`rain_30d`).
+
+Compared to temperature, the smoothed rain series does not show a clear winter–summer pattern. This suggests that rain duration is mainly driven by short-term weather events and not by a strong seasonal cycle.
+
+```{r plot-rain-duration-over-time, fig.width=10, fig.height=4.5, dpi=300}
+
+rain_plot_df <- final_rain_temp_df %>%
+  arrange(date) %>%
+  mutate(rain_30d = zoo::rollmean(rain_duration, k = 30, fill = NA, align = "center"))
+
+ggplot(rain_plot_df, aes(x = date)) +
+  # daily values (faint)
+  geom_line(aes(y = rain_duration), color = "grey80", linewidth = 0.35) +
+  # smoothed trend (clear)
+  geom_line(aes(y = rain_30d), color = "#3182bd", linewidth = 1.05) +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b %Y") +
+  labs(
+    title = "Daily Mean Rain Duration in Zurich",
+    subtitle = "Daily observations with 30-day rolling mean",
+    x = NULL,
+    y = "Rain duration (hours)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+### Relationship between Temperature and Rain Duration
+
+The following scatter plot shows the daily average temperature and the daily mean rain duration in Zurich. Each point represents one day.
+
+The aim of this plot is to see if there is a clear pattern between temperature and rainfall. Since temperature follows a strong seasonal pattern (cold in winter, warm in summer), we want to check if rain duration also follows a similar structure.
+
+By looking at both variables together, we can see if certain temperature ranges are linked to more rainfall. If there is no clear pattern, this would mean that rain is mainly driven by short-term weather events and not by a strong seasonal cycle.
+
+Overall, this plot helps to better understand the weather data before we analyse its relationship with wastewater viral load.
+
+```{r plot-temperature-vs-rain, fig.width=9, fig.height=4.5, dpi=300}
+
+ggplot(final_rain_temp_df, aes(x = temperature, y = rain_duration)) +
+  geom_point(alpha = 0.25, color = "#3182bd", size = 1.2) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 1, color = "#de2d26") +
+  labs(
+    title = "Temperature vs. Rain Duration in Zurich",
+    subtitle = "Daily Zurich-wide averages with LOESS trend",
+    x = "Temperature (°C)",
+    y = "Rain duration (hours)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+```
+
+## Weather lag analysis (7-day lag)
+
+In time-series analysis of wastewater viral load, delayed relationships are common. This means that a change in one variable can influence another variable after some days. These delayed effects are usually analysed using lagged variables or distributed lag models (GeeksforGeeks, 2025). In this project, we did not use more complex distributed lag models because the dataset only covers two years and the study is exploratory.
+
+To include a possible delay, we created 7-day lagged weather variables for temperature and rain duration. The new dataset is called `weather_lag_df`. This means that the viral load on day *t* is compared with the weather conditions from the previous 7 days:
+
+$$
+t - 7
+$$
+
+Rain duration is mainly included to check possible dilution effects in wastewater. When it rains heavily, more water enters the sewage system. This can dilute the viral concentration, meaning that the measured viral load may decrease even if the actual number of infected people does not change.
+
+However, rainfall usually happens in short and irregular events. Some days have no rain at all, while others have strong but brief rainfall. Because of this high variability, rain duration does not follow a stable seasonal pattern like temperature. For this reason, we expect the relationship between rain duration and viral load to be weaker and less stable compared to temperature.
+
+```{r create-lags, echo=FALSE}
+# Create 7-day lagged weather variables (computed on daily weather data)
+weather_lag_df <- final_rain_temp_df %>%
+  arrange(date) %>%
+  mutate(
+    temperature_lag7   = lag(temperature, 7),
+    rain_duration_lag7 = lag(rain_duration, 7)
+  )
+```
+
+In the following step, we compute the lagged variables on the daily weather dataset and then merge them into the wastewater dataset by date.
+
+```{r join-lagged-wastewater-weather-datset, echo=FALSE}
+# Join lagged weather to wastewater (one row per virus and date)
+final_dataset_analysis <- wastewater_zh_clean %>%
+  left_join(
+    weather_lag_df,
+    by = "date"
+  )
+```
+
+### Viral load vs temperature (7-day lag)
+
+The following figure explores the relationship between wastewater viral load and air temperature lagged by 7 days. Therefore we created a plot named ´lag_plot_df´. 
+A smoothing curve is added to highlight potential non-linear trends.
+
+```{r lag-plot-temp, echo=FALSE, fig.width=11, fig.height=6.5, dpi=300}
+
+virus_colors <- c(
+  "Influenza A" = "#1b9e77",
+  "Influenza B" = "#7570b3",
+  "RSV"         = "#e7298a",
+  "SARS-CoV-2"  = "#d95f02"
+)
+
+lag_plot_df <- final_dataset_analysis %>%
+  filter(!is.na(temperature_lag7)) %>%
+  mutate(
+    value_category = recode(
+      value_category,
+      "influenza_a"                 = "Influenza A",
+      "influenza_b"                 = "Influenza B",
+      "respiratory_syncytial_virus" = "RSV",
+      "sars-cov-2"                  = "SARS-CoV-2"
+    )
+  )
+
+ggplot(
+  lag_plot_df,
+  aes(x = temperature_lag7, y = sqrt(value_mean7d))
+) +
+  geom_point(alpha = 0.20, color = "grey45", size = 1.1) +
+  geom_smooth(
+    aes(color = value_category),
+    method = "loess",
+    se = FALSE,
+    linewidth = 1
+  ) +
+  facet_wrap(
+    ~ value_category,
+    scales = "free_y",
+    ncol = 2,
+    axes = "all"
+  ) +
+  scale_color_manual(values = virus_colors, guide = "none") +
+  labs(
+    title = "Viral load vs temperature (7-day lag)",
+    subtitle = "Each point is a day; weather covariates shifted by 7 days (t-7)",
+    x = "Temperature (°C), lagged by 7 days",
+    y = expression(sqrt("value_mean7d"))
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    strip.text = element_text(face = "bold"),
+    strip.background = element_rect(fill = "grey92", color = NA),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    panel.spacing = unit(1, "lines")
+  )
+```
+
+**Interpretation (Viral load vs temperature, 7-day lag)**
+
+The scatter plot shows wastewater viral load (7-day mean, square-root transformed) compared to air temperature lagged by 7 days. The smoothed lines show the general trend, but there is still a lot of day-to-day variation for all viruses.
+
+- **Influenza A** has high viral load at low temperatures (approximately under 10°C). As temperature increases, viral load decreases. This shows a clear negative relationship and a strong winter/cold season pattern.
+
+- **Influenza B** shows a similar negative relationship, but the pattern is weaker and more variable. Higher values mainly appear at lower temperatures, which suggests winter circulation, but with more variation.
+
+- **RSV** also shows a strong negative relationship. Viral load is higher in cold periods and decreases quickly when temperatures rise. This fits with strong winter seasonality.
+
+- **SARS-CoV-2** does not show a clear pattern. Viral load appears across a wide range of temperatures, and the smoothed line is relatively flat.
+
+Overall, Influenza A, Influenza B, and RSV mostly appear at lower lagged temperatures. SARS-CoV-2 does not show a clear temperature relationship.
+
+These results should be interpreted as associations, not causal effects, because temperature is also linked to seasonal and behavioural factors, such as more indoor gatherings in winter.
+
+The plots also show differences between temperature and rain duration as predictors. Temperature follows a clear and regular seasonal cycle, so it makes sense to use it in seasonal models. Rain duration, however, is driven by short-term weather events, which makes it less stable as an explanatory variable in time-series models.
+
+## Viral load vs temperature (7-day lag) – Winter-only analysis
+
+In the previous section, we analysed the relationship between wastewater viral load and temperature lagged by 7 days using the full dataset named `final_dataset_analysis`.
+
+However, both viral circulation and weather conditions follow strong seasonal patterns (e.g., high viral loads and low temperatures occur mainly during winter). This can lead to seasonal confounding, where the observed relationship is due to differences between seasons and not due to short-term weather effects therefore temperature changes.
+
+To reduce this confounding, we repeated the lag analysis using only winter months from December to February. This restriction allows us to examine whether temperature variation within winter is associated with changes in wastewater viral load, independent of the overall seasonal cycle.
+
+```{r lag-plot-temp-winter, echo=FALSE, fig.width=10, fig.height=6.5, dpi=300}
+
+virus_colors <- c(
+  "Influenza A" = "#1b9e77",
+  "Influenza B" = "#7570b3",
+  "RSV"         = "#e7298a",
+  "SARS-CoV-2"  = "#d95f02"
+)
+
+winter_lag_df <- final_dataset_analysis %>%
+  mutate(
+    month = month(date),
+    value_category = recode(
+      value_category,
+      "influenza_a"                 = "Influenza A",
+      "influenza_b"                 = "Influenza B",
+      "respiratory_syncytial_virus" = "RSV",
+      "sars-cov-2"                  = "SARS-CoV-2"
+    )
+  ) %>%
+  filter(month %in% c(12, 1, 2)) %>%
+  filter(!is.na(temperature_lag7))
+
+ggplot(
+  winter_lag_df,
+  aes(x = temperature_lag7, y = sqrt(value_mean7d))
+) +
+  geom_point(alpha = 0.20, color = "grey45", size = 1.1) +
+  geom_smooth(
+    aes(color = value_category),
+    method = "loess",
+    se = FALSE,
+    linewidth = 1
+  ) +
+  facet_wrap(
+    ~ value_category,
+    scales = "free_y",
+    ncol = 2,
+    axes = "all"
+  ) +
+  scale_color_manual(values = virus_colors, guide = "none") +
+  labs(
+    title = "Viral load vs temperature (7-day lag) – Winter only",
+    subtitle = "Restricted to Dec–Feb to reduce seasonal confounding",
+    x = "Temperature (°C), lagged by 7 days",
+    y = expression(sqrt("value_mean7d"))
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    strip.text = element_text(face = "bold"),
+    strip.background = element_rect(fill = "grey92", color = NA),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    panel.spacing = unit(1, "lines")
+  )
+```
+
+**Interpretation (Winter-only temperature lag)**
+
+The winter-only scatter plots show the relationship between temperature and viral load using only data from December to February. This helps to reduce strong seasonal differences between winter and summer.
+
+For **Influenza A**, **Influenza B** and **RSV**, higher viral loads are still seen at lower temperatures. This means the negative relationship with temperature is not only because winter is different from summer, but also exists within winter itself. Therefore, we can assume that the colder it gets the higher the viral load in wastewater.
+
+For **SARS-CoV-2**, there is no clear pattern with temperature. Viral load appears across the whole range of winter temperatures. This suggests that other factors, such as population immunity, new variants, or behavioural changes, may be more important for SARS-CoV-2.
+
+Overall, looking only at winter months supports the idea that temperature may have an additional effect within the season for influenza viruses and RSV, not just a general seasonal effect. Therefore, we next use regression models with lagged weather variables to measure these relationships more clearly.
+
+## Lag sensitivity analysis: Comparing different weather delays
+
+In this project, we used a 7-day lag to relate weather conditions to wastewater viral load. This choice is based on biological plausibility and also fits with the 7-day rolling mean used for the viral data.
+
+To check whether this choice makes a difference, we run a sensitivity analysis. We compare the relationship between temperature and viral load using different lags:
+
+- no lag (lag 0)
+- 7-day lag
+- 14-day lag
+
+This analysis does not fit new models but checks whether the observed patterns are stable when using different delays.
+
+```{r lag-sensitivity-prep, message=FALSE}
+lag_sensitivity_df <- final_dataset_analysis %>%
+  arrange(date) %>%
+  mutate(
+    temp_lag0  = temperature,
+    temp_lag7  = temperature_lag7,
+    temp_lag14 = dplyr::lag(temperature, 14)
+  ) %>%
+  filter(!is.na(temp_lag14))
+```
+
+```{r lag-sensitivity-plot, fig.width=11, fig.height=6.5, dpi=300}
+
+virus_colors <- c(
+  "Influenza A" = "#1b9e77",
+  "Influenza B" = "#7570b3",
+  "RSV"         = "#e7298a",
+  "SARS-CoV-2"  = "#d95f02"
+)
+
+lag_long_df <- lag_sensitivity_df %>%
+  select(
+    date,
+    value_category,
+    value_mean7d,
+    temp_lag0,
+    temp_lag7,
+    temp_lag14
+  ) %>%
+  pivot_longer(
+    cols = starts_with("temp_lag"),
+    names_to = "lag",
+    values_to = "temperature"
+  ) %>%
+  mutate(
+    lag = recode(
+      lag,
+      "temp_lag0"  = "Lag 0 days",
+      "temp_lag7"  = "Lag 7 days",
+      "temp_lag14" = "Lag 14 days"
+    ),
+    value_category = recode(
+      value_category,
+      "influenza_a"                 = "Influenza A",
+      "influenza_b"                 = "Influenza B",
+      "respiratory_syncytial_virus" = "RSV",
+      "sars-cov-2"                  = "SARS-CoV-2"
+    )
+  )
+
+ggplot(
+  lag_long_df,
+  aes(x = temperature, y = sqrt(value_mean7d))
+) +
+  geom_point(alpha = 0.15, color = "grey45", size = 1) +
+  geom_smooth(
+    aes(color = value_category),
+    method = "loess",
+    se = FALSE,
+    linewidth = 1
+  ) +
+  facet_grid(value_category ~ lag, scales = "free_y") +
+  scale_color_manual(values = virus_colors, guide = "none") +
+  labs(
+    title = "Lag sensitivity analysis: Viral load vs temperature",
+    subtitle = "Comparison of temperature lags (0, 7, 14 days)",
+    x = "Temperature (°C)",
+    y = expression(sqrt("value_mean7d"))
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+**Interpretation**
+
+The relationship between temperature and viral load looks very similar for all three lags. This shows that the temperature effect does not change much when shifting it by a few days. Since the measured values can fluctuate, we decided to use the 7-day lag. A delay of about one week is biologically realistic, because it is plausible that several days may pass between infection and detectable viral shedding in wastewater. In addition the weekly logic follows the FOPH monitoring system (Federal Office of Public Health [FOPH], n.d.). Here values are reported using 7-day averages. Therefore, using a 7-day lag is consistent and methodologically reasonable. In addition, the number of missing values for the 7-day lag was low, as shown in the previous section [Missingness summary per virus target (value_category)](#missingness-summary).
+
+## Viral load vs rain duration (7-day lag)
+
+The following figure explores the relationship between wastewater viral load and **rain duration lagged by 7 days** named `lag_plot_df_rain`. A smoothing curve is added to highlight potential non-linear trends.
+
+```{r lag-plot-rain, echo=FALSE, fig.width=11, fig.height=6.5, dpi=300}
+
+virus_colors <- c(
+  "Influenza A" = "#1b9e77",
+  "Influenza B" = "#7570b3",
+  "RSV"         = "#e7298a",
+  "SARS-CoV-2"  = "#d95f02"
+)
+
+lag_plot_df_rain <- final_dataset_analysis %>%
+  filter(!is.na(rain_duration_lag7)) %>%
+  mutate(
+    value_category = recode(
+      value_category,
+      "influenza_a"                 = "Influenza A",
+      "influenza_b"                 = "Influenza B",
+      "respiratory_syncytial_virus" = "RSV",
+      "sars-cov-2"                  = "SARS-CoV-2"
+    )
+  )
+
+ggplot(
+  lag_plot_df_rain,
+  aes(x = rain_duration_lag7, y = sqrt(value_mean7d))
+) +
+  geom_point(
+    alpha = 0.20,
+    color = "grey45",   # blue rain points
+    size = 1.1
+  ) +
+  geom_smooth(
+    aes(color = value_category),
+    method = "loess",
+    se = FALSE,
+    linewidth = 1
+  ) +
+  facet_wrap(
+    ~ value_category,
+    scales = "free_y",
+    ncol = 2,
+    axes = "all"
+  ) +
+  scale_color_manual(values = virus_colors, guide = "none") +
+  labs(
+    title = "Viral load vs rain duration (7-day lag)",
+    subtitle = "Each point is a day; weather covariates shifted by 7 days (t-7)",
+    x = "Rain duration (hours), lagged by 7 days",
+    y = expression(sqrt("value_mean7d"))
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    strip.text = element_text(face = "bold"),
+    strip.background = element_rect(fill = "grey92", color = NA),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    panel.spacing = unit(1, "lines")
+  )
+```
+
+**Interpretation (Viral load vs rain duration, 7-day lag)**
+
+The faceted scatter plots compare wastewater viral load (7-day rolling mean, square-root transformed) with rain duration lagged by 7 days for each virus target. Overall, the relationship between rain duration and viral load appears weak and highly variable.
+
+Most observations are close to 0 hours of rain duration, indicating that many days in Zurich have no rain (or only very short rainfall periods). This creates a dense vertical band on the left side of the plots. Days with long rain duration are rare, and the smoothing curve at high rain values is based on few observations.
+
+- For **Influenza A** and **RSV**, the smoothing curve shows a small increase at higher rain duration. However, this effect is weak and difficult to separate from the general variability in viral load.
+
+- For **Influenza B**, the smoothed trend is mostly flat and shows a slight decrease for longer rain duration. This does not indicate a clear positive association.
+
+- For **SARS-CoV-2**, the smoothing curve is almost flat, suggesting that rain duration has no strong effect on viral load at a 7-day lag.
+
+In summary, rain duration does not show a clear or consistent association with viral load across the different viruses in this exploratory analysis. Compared to temperature, rainfall appears to be a weaker predictor of wastewater viral load. Next, we use models to see if rain duration affects viral load in winter.
+
+### Viral load vs rain duration (7-day lag) - Winter-only analysis
+
+```{r lag-plot-rain-winter, echo=FALSE, fig.width=11, fig.height=6.5, dpi=300}
+
+virus_colors <- c(
+  "Influenza A" = "#1b9e77",
+  "Influenza B" = "#7570b3",
+  "RSV"         = "#e7298a",
+  "SARS-CoV-2"  = "#d95f02"
+)
+
+winter_rain_lag_df <- final_dataset_analysis %>%
+  mutate(
+    month = month(date),
+    value_category = recode(
+      value_category,
+      "influenza_a"                 = "Influenza A",
+      "influenza_b"                 = "Influenza B",
+      "respiratory_syncytial_virus" = "RSV",
+      "sars-cov-2"                  = "SARS-CoV-2"
+    )
+  ) %>%
+  filter(month %in% c(12, 1, 2)) %>%          # Winter only
+  filter(!is.na(rain_duration_lag7))           # remove missing lag values
+
+ggplot(
+  winter_rain_lag_df,
+  aes(x = rain_duration_lag7, y = sqrt(value_mean7d))
+) +
+  geom_point(
+    alpha = 0.20,
+    color = "grey45",   # blue rain points
+    size = 1.1
+  ) +
+  geom_smooth(
+    aes(color = value_category),
+    method = "loess",
+    se = FALSE,
+    linewidth = 1
+  ) +
+  facet_wrap(
+    ~ value_category,
+    scales = "free_y",
+    ncol = 2,
+    axes = "all"
+  ) +
+  scale_color_manual(values = virus_colors, guide = "none") +
+  labs(
+    title = "Viral load vs rain duration (7-day lag) – Winter only",
+    subtitle = "Each point is a day; restricted to Dec–Feb to reduce seasonal confounding",
+    x = "Rain duration (hours), lagged by 7 days",
+    y = expression(sqrt("value_mean7d"))
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    strip.text = element_text(face = "bold"),
+    strip.background = element_rect(fill = "grey92", color = NA),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    panel.spacing = unit(1, "lines")
+  )
+```
+
+**Interpretation**
+
+To avoid effects caused by differences between seasons, we again only used data from the winter months from December to February. This makes it possible to look at whether rainfall differences within winter are related to changes in wastewater viral load, without the strong winter–summer seasonal effects seen for several viruses.
+
+Looking at the winter-only plots, no clear or consistent increase in viral load with higher rain duration is visible for any virus. The data points are widely spread, and the smoothing curves show only weak and irregular patterns, rather than a clear relationship.
+
+- **Influenza A:** Viral load is mostly similar at low and medium rain duration and then becomes lower at higher rain duration. This means that more rain within winter does not lead to higher Influenza A viral load. It may even be linked to lower values.
+
+- **Influenza B:** A similar pattern is visible. Viral load is higher at low rain duration and decreases with more rain. At high rain duration, only few data points are present.
+
+- **RSV** shows a mostly flat or slightly decreasing pattern with rain duration. There is little indication of a positive effect of rainfall within winter.
+
+- **SARS-CoV-2:** The smoothing curve shows a weak and non-linear pattern. Viral load stays similar across most rain durations and decreases slightly at higher values. Overall, no clear rainfall-related pattern is visible.
+
+In summary, limiting the analysis to winter months does not show stronger evidence for an effect of rain duration on wastewater viral load. This supports the idea that the weak relationships seen in the full dataset are mainly due to seasonal structure and temporal variability, and not due to a direct effect of rainfall.
+
+While the winter-only analyses reduce strong seasonal confounding, they are still limited to a subset of the data and rely on visual interpretation of smoothed trends. In particular, these plots cannot fully separate short-term weather effects from long-term temporal dynamics in viral circulation.
+
+To address this limitation, we next apply a model-based approach that explicitly accounts for complex temporal structure while estimating non-linear weather effects. Generalized Additive Models (GAMs) are therefore used to quantify within-season weather associations while controlling for long-term trends and seasonality.
+
+## Generalized Additive Model (GAM) Results
+
+### Overview of the GAM analysis
+
+Previous sections demonstrated strong seasonal patterns in wastewater viral load, clear wave onsets, and consistent associations between viral load and air temperature. However, these analyses could not fully disentangle whether observed weather effects simply reflect broad seasonal differences (e.g. winter vs. summer) or whether weather variables exert an additional influence within these seasonal trends.
+
+To address this question, we applied Generalized Additive Models (GAMs). GAMs allow flexible, non-linear relationships between predictors and the response while explicitly controlling for complex temporal structure. In this analysis, GAMs are used as a mechanistic modelling tool to separate long-term temporal dynamics from short-term weather-related variability in wastewater viral load.
+
+Generalized Additive Models (GAMs) were fitted to quantify the association between weather conditions and wastewater viral load while explicitly controlling for long-term trends and seasonality. The response variable was the square-root–transformed 7-day rolling mean of viral load, which stabilizes variance and preserves zero values. 
+
+For each virus target (Influenza A, Influenza B, RSV, and SARS-CoV-2), a separate GAM was fitted with the following structure:
+
+- The outcome variable was the square-root–transformed 7-day rolling mean of viral load, which stabilizes variance while keeping zero values.
+- We included a flexible smooth of time, \( s(t) \), (max basis k=40) to capture long-term trends and seasonal patterns, so weather effects reflect short-term deviations rather than seasonality itself.
+- Smooth functions of air temperature lagged by 7 days and rain duration lagged by 7 days were included to model potential non-linear weather effects.
+- Models were fitted using restricted maximum likelihood (REML).
+
+By including a highly flexible smooth of time, the model absorbs most large-scale seasonal structure, allowing the estimated weather effects to be interpreted as within-trend associations rather than reflections of winter–summer differences.
+
+### Partial effect interpretation
+
+Partial effect plots show the estimated contribution of individual predictors to wastewater viral load while holding all other model components constant. Importantly, because the smooth time term captures long-term and seasonal variation, the weather effects shown below reflect short-term modulation of viral load within periods of active circulation, not the initiation of new epidemic waves.
+
+```{r gam-preparation, message=FALSE}
+
+gam_df_time <- final_dataset_analysis %>%
+  dplyr::mutate(
+    value_category = recode(
+      value_category,
+      "influenza_a"                 = "Influenza A",
+      "influenza_b"                 = "Influenza B",
+      "respiratory_syncytial_virus" = "RSV",
+      "sars-cov-2"                  = "SARS-CoV-2"
+    ),
+    y = sqrt(as.numeric(value_mean7d)),
+    t = as.numeric(date)   # numeric time index
+  ) %>%
+  dplyr::filter(
+    !is.na(y),
+    !is.na(t),
+    !is.na(temperature_lag7),
+    !is.na(rain_duration_lag7)
+  )
+
+virus_levels_time <- c(
+  "Influenza A",
+  "Influenza B",
+  "RSV",
+  "SARS-CoV-2"
+)
+```
+
+```{r gam-model, message=FALSE}
+gam_models_time <- lapply(virus_levels_time, function(v) {
+
+  df_v <- gam_df_time %>% dplyr::filter(value_category == v)
+
+  mgcv::gam(
+    y ~
+      s(t, k = 40) +
+      s(temperature_lag7, k = 10) +
+      s(rain_duration_lag7, k = 10),
+    data = df_v,
+    method = "REML"
+  )
+})
+
+names(gam_models_time) <- virus_levels_time
+```
+
+```{r gam-partial-helper-time, message=FALSE}
+make_partial_effect_df_time <- function(model, df_v, var, n = 200) {
+
+  base <- df_v[1, , drop = FALSE]
+  base$t <- median(df_v$t, na.rm = TRUE)
+  base$temperature_lag7 <- median(df_v$temperature_lag7, na.rm = TRUE)
+  base$rain_duration_lag7 <- median(df_v$rain_duration_lag7, na.rm = TRUE)
+
+  grid <- base[rep(1, n), , drop = FALSE]
+  grid[[var]] <- seq(
+    min(df_v[[var]], na.rm = TRUE),
+    max(df_v[[var]], na.rm = TRUE),
+    length.out = n
+  )
+
+  pr <- predict(model, newdata = grid, type = "terms", se.fit = TRUE)
+  term_names <- colnames(pr$fit)
+
+  target_term <- term_names[grepl(paste0("\\(", var, "\\)"), term_names)]
+  if (length(target_term) < 1)
+    target_term <- term_names[grepl(var, term_names)]
+  target_term <- target_term[1]
+
+  tibble::tibble(
+    x = grid[[var]],
+    effect = pr$fit[, target_term],
+    se = pr$se.fit[, target_term]
+  ) %>%
+    dplyr::mutate(
+      lower = effect - 1.96 * se,
+      upper = effect + 1.96 * se
+    )
+}
+```
+
+```{r gam-temp-effect-time, fig.width=11, fig.height=6.5, dpi=300}
+
+# Virus colors (consistent across all plots)
+virus_colors <- c(
+  "Influenza A" = "#1b9e77",
+  "Influenza B" = "#7570b3",
+  "RSV"         = "#e7298a",
+  "SARS-CoV-2"  = "#d95f02"
+)
+
+# Build partial effect data frame for temperature
+temp_effect_time_df <- dplyr::bind_rows(
+  lapply(names(gam_models_time), function(v) {
+
+    df_v <- gam_df_time %>%
+      dplyr::filter(value_category == v)
+
+    eff <- make_partial_effect_df_time(
+      model = gam_models_time[[v]],
+      df_v  = df_v,
+      var   = "temperature_lag7",
+      n     = 200
+    )
+
+    eff$virus <- v
+    eff
+  })
+)
+
+# Plot
+ggplot(
+  temp_effect_time_df,
+  aes(x = x, y = effect, color = virus, fill = virus)
+) +
+  geom_ribbon(
+    aes(ymin = lower, ymax = upper),
+    alpha = 0.20,
+    linewidth = 0
+  ) +
+  geom_line(linewidth = 1) +
+  facet_wrap(
+    ~ virus,
+    scales = "free_y",
+    ncol = 2,
+    axes = "all"
+  ) +
+  scale_color_manual(values = virus_colors, guide = "none") +
+  scale_fill_manual(values = virus_colors, guide = "none") +
+  labs(
+    title = "GAM partial effect: Temperature (7-day lag)",
+    subtitle = "Smooth temperature effect after controlling for long-term time trend s(t)",
+    x = "Temperature (°C), lagged by 7 days",
+    y = "Partial effect on sqrt(value_mean7d)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    strip.text = element_text(face = "bold"),
+    strip.background = element_rect(fill = "grey92", color = NA),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.spacing = unit(1, "lines")
+  )
+```
+
+### Interpretation temperature effects (7-day lag)
+
+For **Influenza A, Influenza B, and RSV**, the partial effect of temperature shows higher wastewater viral load at lower temperatures after controlling for long-term trends and seasonality. This indicates that colder conditions are associated with increased viral load within periods of active circulation, consistent with winter amplification of seasonal respiratory viruses.
+
+However, these results do not imply that cold temperature alone would induce viral circulation outside the winter season. Instead, temperature acts as a modulating factor, amplifying viral load during winter periods when transmission is already ongoing.
+
+For **SARS-CoV-2**, the temperature effect is weaker and more linear, with viral load decreasing gradually as temperature increases. This aligns with the less pronounced seasonality observed for SARS-CoV-2 compared to influenza viruses and RSV.
+
+Overall, the GAM results suggest that temperature has an independent and non-linear association with wastewater viral load for seasonal viruses, beyond simple winter–summer differences.
+
+```{r gam-rain-effect-time, fig.width=11, fig.height=6.5, dpi=300}
+
+virus_colors <- c(
+  "Influenza A" = "#1b9e77",
+  "Influenza B" = "#7570b3",
+  "RSV"         = "#e7298a",
+  "SARS-CoV-2"  = "#d95f02"
+)
+
+rain_effect_time_df <- dplyr::bind_rows(
+  lapply(names(gam_models_time), function(v) {
+
+    df_v <- gam_df_time %>% dplyr::filter(value_category == v)
+
+    eff <- make_partial_effect_df_time(
+      gam_models_time[[v]],
+      df_v,
+      var = "rain_duration_lag7",
+      n = 200
+    )
+
+    eff$virus <- v
+    eff
+  })
+)
+
+ggplot(
+  rain_effect_time_df,
+  aes(x = x, y = effect, color = virus, fill = virus)
+) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.20, linewidth = 0) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ virus, scales = "free_y", ncol = 2, axes = "all") +
+  scale_color_manual(values = virus_colors, guide = "none") +
+  scale_fill_manual(values = virus_colors, guide = "none") +
+  labs(
+    title = "GAM partial effect: Rain duration (7-day lag)",
+    subtitle = "Smooth rain effect after controlling for long-term time trend s(t)",
+    x = "Rain duration (hours), lagged by 7 days",
+    y = "Partial effect on sqrt(value_mean7d)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    strip.text = element_text(face = "bold"),
+    strip.background = element_rect(fill = "grey92", color = NA),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.spacing = unit(1, "lines")
+  )
+```
+
+### Interpretation rain duration effects (7-day lag)
+
+In contrast to temperature, the partial effect plots for rain duration show no strong or consistent association with wastewater viral load across the four virus targets once long-term temporal dynamics are accounted for.
+
+For **Influenza A** and **SARS-CoV-2**, the estimated smooths suggest a weak negative association at higher rain durations. For **Influenza B**, the relationship is non-linear with declining viral load at higher rain durations. In contrast, **RSV** shows a weak positive trend.
+
+Across all viruses, confidence intervals widen substantially at longer rain durations, reflecting sparse data for days with prolonged rainfall. This high uncertainty limits interpretability and indicates that the estimated effects are not robust.
+
+Overall, rain duration does not appear to exert a systematic independent influence on wastewater viral load. The weak and inconsistent trends observed are likely driven by variability and limited observations rather than a causal rainfall-related mechanism.
+
+**Interpretation**
+
+The GAM analysis highlights that:
+
+- Air temperature has a clear within-season association with wastewater viral load for **Influenza A**, **Influenza B**, and **RSV**.
+- This effect represents seasonal amplification rather than temperature-driven outbreak initiation.
+- Rain duration shows weak, inconsistent, and highly uncertain effects across all viruses.
+- **SARS-CoV-2** differs from seasonal respiratory viruses by exhibiting weaker temperature dependence and minimal rainfall sensitivity.
+
+It is important to emphasize that the GAMs are not forecasting models. They are designed to explain observed variation by separating long-term trends from short-term associations. As such, the models describe how weather variables modulate viral load within observed periods rather than predicting future epidemic dynamics.
+
+Overall, the GAMs provide a flexible and interpretable framework to distinguish seasonal structure from short-term weather modulation, complementing the wave onset detection and scenario-based modelling presented before.
+
+## Chapter of Choice: Wave onset detection in wastewater time series with Plotly
+
+In this chapter, we focus on detecting and visualizing wastewater viral load time series, so-called wave onsets. In the previous sections, we analysed seasonal patterns and weather effects. Here, the goal is to identify when sustained growth begins before a major viral peak.
+
+Wave onsets are not treated as single days, but as periods with continuously increasing viral load. We use this concept because wastewater data is noisy and it is difficult to define one exact start date. Instead of selecting one specific day, we define onset zones that describe a positive trend before a larger wave starts.
+
+We visualize these onset zones using Plotly, an interactive visualization library for R. We chose this as our chapter of choice because interactive plots are especially helpful for long and noisy time series. They allow users to zoom in, move along the timeline, and inspect values in detail. This makes it easier to explore the data and better understand how the detected onset zones relate to the observed viral peaks. Users also have the option to hide a virus by clicking on its name in the legend on the right side. This allows them to focus only on the viruses they are interested in and makes it easier to compare specific time series without distraction.
+
+All four viruses are shown in aligned time series with the same time axis, which allows direct comparison between virus targets. The detected onset zones are added as shaded areas, linking the statistical detection of onsets with the visual interpretation of the time series.
+
+All analyses use the 7-day rolling mean (`value_mean7d`) to smooth the data and reduce noise and missing values. The viral load is square-root transformed (`sqrt(value)`) to keep zero values while making the variance more stable. Wave onsets are defined as periods with a sustained positive trend, based on rolling linear slopes, so short-term fluctuations are not mistaken for real onsets.
+
+The detection is implemented as a function (`detect_wave_onset_zones`) that looks at each virus separately and orders the data by date. Larger waves are identified using a high quantile threshold (`high_quantile`) to define major waves. This ensures that only clearly elevated circulation phases are considered while avoiding sensitivity to minor fluctuations. For each detected wave, a fixed time window before the wave is analysed (pre_window_days = 60). Within this window, rolling linear slopes are calculated (`trend_window`) and consecutive positive slopes above a minimum threshold (`min_slope`) are used to define possible onset zones (`min_zone_length`).
+
+To avoid false positives, we apply a simple validation step. The average viral load after an onset zone must be higher than during the zone (`mean_post > mean_zone`), otherwise the zone is removed. Overall, this approach focuses on continuous epidemic growth and links statistical detection with what can be seen in the time series.
+
+```{r define-detect-wave-onset-zones, message=FALSE}
+detect_wave_onset_zones <- function(data, virus_name,
+                                    high_quantile = 0.80,
+                                    min_high_duration = 14,
+                                    trend_window = 7,
+                                    min_slope = 0.005,
+                                    pre_window_days = 60,
+                                    min_zone_length = 7) {
+
+  # prepare time series
+  df <- data %>%
+    dplyr::filter(value_category == virus_name) %>%
+    dplyr::arrange(date) %>%
+    dplyr::mutate(
+      date = as.Date(date),
+      y = sqrt(as.numeric(value_mean7d))
+    ) %>%
+    dplyr::filter(!is.na(date), !is.na(y))
+
+  if (nrow(df) < 40) {
+    return(list(df = df, zones = tibble::tibble()))
+  }
+
+  # define major waves (sustained high phase)
+  threshold <- stats::quantile(df$y, high_quantile, na.rm = TRUE)
+
+  df <- df %>%
+    dplyr::mutate(
+      high_phase = y >= threshold,
+      phase_id = with(rle(high_phase),
+                      rep(seq_along(lengths), lengths))
+    )
+
+  waves <- df %>%
+    dplyr::group_by(phase_id) %>%
+    dplyr::summarise(
+      is_wave    = first(high_phase),
+      wave_start = first(date),
+      duration   = dplyr::n(),
+      .groups = "drop"
+    ) %>%
+    dplyr::filter(is_wave, duration >= min_high_duration) %>%
+    dplyr::arrange(wave_start)
+
+  if (nrow(waves) == 0) {
+    return(list(df = df, zones = tibble::tibble()))
+  }
+
+  # STEP B: detect onset zones before each wave
+  zones_list <- lapply(seq_len(nrow(waves)), function(i) {
+
+    df_pre <- df %>%
+      dplyr::filter(date < waves$wave_start[i]) %>%
+      tail(pre_window_days)
+
+    if (nrow(df_pre) < trend_window) return(NULL)
+
+    df_pre <- df_pre %>%
+      dplyr::mutate(
+        slope = zoo::rollapply(
+          y,
+          width = trend_window,
+          align = "right",
+          fill  = NA,
+          FUN = function(y_win)
+            coef(lm(y_win ~ seq_along(y_win)))[2]
+        ),
+        pos_trend = !is.na(slope) & slope > min_slope,
+        run_id = with(rle(pos_trend),
+                      rep(seq_along(lengths), lengths))
+      )
+
+    zones_i <- df_pre %>%
+      dplyr::group_by(run_id) %>%
+      dplyr::summarise(
+        is_zone    = first(pos_trend),
+        zone_start = first(date),
+        zone_end   = last(date),
+        duration   = dplyr::n(),
+        mean_slope = mean(slope, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::filter(is_zone, duration >= min_zone_length)
+
+    if (nrow(zones_i) == 0) return(NULL)
+
+    # VALIDATION: must actually rise AFTER the zone
+    zones_i <- zones_i %>%
+      dplyr::rowwise() %>%
+      dplyr::mutate(
+        mean_during = mean(
+          df$y[df$date >= zone_start & df$date <= zone_end],
+          na.rm = TRUE
+        ),
+        mean_after = mean(
+          df$y[df$date > zone_end & df$date <= zone_end + 14],
+          na.rm = TRUE
+        ),
+        valid_onset = mean_after > mean_during
+      ) %>%
+      dplyr::ungroup() %>%
+      dplyr::filter(valid_onset)
+
+    if (nrow(zones_i) == 0) return(NULL)
+
+    # take the last valid zone before the wave
+    zones_i %>% dplyr::slice_tail(n = 1)
+  })
+
+  list(
+    df    = df,
+    zones = dplyr::bind_rows(zones_list)
+  )
+}
+```
+
+We use the same detection for all viruses, but we run it separately for each virus (`virus_name`). This is important because the viruses behave differently over time and need slightly different settings, for example for the high quantile (`high_quantile`) or the minimum length of a wave (`min_high_duration`). By doing this, each virus is analysed individually and the detection can be adapted to its specific dynamics, rather than applying the same fixed parameters to all viruses.
+
+The method is run in a loop over all viruses (`virus_map`). For each virus, the wave detection function (`detect_wave_onset_zones()`) is applied using the matching value category (`value_category`).
+
+The results are stored together (`results`) and then merged into one dataset for the time series (`ts_all`) and one for the onset zones (`zones_all`). This makes it possible to plot all viruses in the same way and compare them directly later on.
+
+```{r wave-zones-build, message=FALSE}
+virus_map <- tibble::tibble(
+  virus = c("Influenza A", "Influenza B", "RSV", "SARS-CoV-2"),
+  value_category = c("influenza_a", "influenza_b",  "respiratory_syncytial_virus" , "sars-cov-2")
+)
+
+results <- lapply(seq_len(nrow(virus_map)), function(i) {
+
+  v  <- virus_map$virus[i]
+  vc <- virus_map$value_category[i]
+
+  detect_wave_onset_zones(
+    data = final_dataset_analysis,
+    virus_name = vc,
+    high_quantile      = ifelse(v == "SARS-CoV-2", 0.75, 0.80),
+    min_high_duration  = ifelse(v %in% c("Influenza B", "RSV", "SARS-CoV-2"), 10, 14),
+    trend_window       = 7,
+    min_slope          = ifelse(v == "SARS-CoV-2", 0.004, 0.005),
+    pre_window_days    = 60,
+    min_zone_length    = 7
+  )
+})
+
+# build panel datasets
+ts_all <- dplyr::bind_rows(lapply(seq_along(results), function(i) {
+  results[[i]]$df %>%
+    mutate(virus = virus_map$virus[i])
+}))
+
+zones_all <- dplyr::bind_rows(lapply(seq_along(results), function(i) {
+  results[[i]]$zones %>%
+    mutate(virus = virus_map$virus[i])
+}))
+```
+
+All plots use the same time axis and can be explored interactively.
+
+This makes it easier to see how the detections fit the data. Early increases are easier to spot, and differences in timing and wave patterns between viruses become clearer.
+
+```{r wave-onset-zones-panel-plotly, echo=FALSE, fig.height=13, fig.width=8.5}
+
+virus_order <- c("Influenza A", "Influenza B", "RSV", "SARS-CoV-2")
+
+virus_colors <- c(
+  "Influenza A" = "#1b9e77",
+  "Influenza B" = "#7570b3",
+  "RSV"         = "#e7298a",
+  "SARS-CoV-2"  = "#d95f02"
+)
+
+plots <- lapply(virus_order, function(v) {
+
+  ts_v    <- ts_all    %>% filter(virus == v)
+  zones_v <- zones_all %>% filter(virus == v)
+
+  p <- plotly::plot_ly(
+    data = ts_v,
+    x = ~date,
+    y = ~y,
+    type = "scatter",
+    mode = "lines",
+    name = paste0(v, " – Viral load (7-day mean, sqrt)"),
+    line = list(color = virus_colors[[v]], width = 1.2),
+    showlegend = TRUE,  
+    hovertemplate =
+      "<b>Date:</b> %{x}<br><b>sqrt(load):</b> %{y:.2f}<extra></extra>"
+  )
+
+  # Onset-Zonen
+  if (nrow(zones_v) > 0) {
+    p <- plotly::layout(
+      p,
+      shapes = lapply(seq_len(nrow(zones_v)), function(i) {
+        list(
+          type = "rect",
+          xref = "x",
+          yref = "paper",
+          x0 = zones_v$zone_start[i],
+          x1 = zones_v$zone_end[i],
+          y0 = 0,
+          y1 = 1,
+          fillcolor = "rgba(215,48,39,0.25)",
+          line = list(width = 0)
+        )
+      })
+    )
+  }
+
+  plotly::layout(
+    p,
+    title = list(text = v, x = 0),
+    yaxis = list(title = "sqrt(value_mean7d)")
+  )
+})
+
+plotly::subplot(
+  plots,
+  nrows = 4,
+  shareX = TRUE,
+  titleX = TRUE
+) %>%
+  plotly::layout(
+    title = list(
+      text = paste0(
+        "<b>Detected onset zones of major wastewater viral load waves</b><br>",
+        "<span style='font-size:12px'>Pink shaded areas indicate sustained positive trends preceding major waves.</span>"
+      ),
+      x = 0
+    ),
+    legend = list(
+      orientation = "v",
+      x = 1.02,
+      y = 1,
+      traceorder = "normal"
+    ),
+    xaxis = list(
+      title = "Date",
+      rangeslider = list(visible = TRUE)
+    ),
+    hovermode = "x unified",
+    dragmode = "zoom",
+    margin = list(l = 85, r = 180, t = 110, b = 80)
+  )
+```
+
+**Interpretation**
+
+In the sections before, we looked at seasonal patterns, weather effects, and the detected onset zones (`zones_all`). Up to now, the whole time series (`final_dataset_analysis`) was analysed as one continuous timeline, without clearly separating different phases of a wave.
+
+Here, we take the detected onset zones and split the waves into three phases (`wave_phase`) to look at viral load and weather conditions in more detail:
+
+- **Pre-onset phase** (`wave_phase = "Pre-growth"`): the time before an onset zone, when viral load is still low
+
+- **Onset phase** (`wave_phase = "Growth"`): the onset zone itself, where the viral load starts to increase consistently based on short-term trends (`slope_7d`)
+
+- **Post-onset phase** (`wave_phase = "High-load"`): the period after the onset zone, usually with high or peak viral load (`quantile(sqrt(value_mean7d), 0.75`))
+
+The phase classification is based on short-term changes in the viral load. These trends are calculated using a rolling linear slope over seven days (`rollapply, width = 7`) applied to the square-root transformed viral load (`sqrt(value_mean7d)`).
+
+This way, we can compare early wave development with later stages. The analysis directly uses the previously detected onset zones (`detect_wave_onset_zones()`) and does not add any new detection rules.
+
+```{r wave-phase-construction, message=FALSE}
+# Construct wave-phase labels based on detected onset zones
+
+wave_phase_df <- final_dataset_analysis %>%
+  arrange(value_category, date) %>%
+  group_by(value_category) %>%
+  mutate(
+    # short-term trend using rolling linear slope (7 days)
+    slope_7d = rollapply(
+      sqrt(value_mean7d),
+      width = 7,
+      FUN = function(x) coef(lm(x ~ seq_along(x)))[2],
+      fill = NA,
+      align = "right"
+    ),
+    # phase definition
+    wave_phase = case_when(
+      slope_7d > 0.01 ~ "Growth",
+      sqrt(value_mean7d) >= quantile(sqrt(value_mean7d), 0.75, na.rm = TRUE) ~ "High-load",
+      TRUE ~ "Pre-growth"
+    ),
+    wave_phase = factor(
+      wave_phase,
+      levels = c("Pre-growth", "Growth", "High-load")
+    )
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(wave_phase))
+```
+
+```{r viral-load-by-wave-phase, fig.width=11, fig.height=6.5, dpi=300}
+ggplot(
+  wave_phase_df,
+  aes(x = wave_phase, y = sqrt(value_mean7d), fill = wave_phase)
+) +
+  geom_boxplot(alpha = 0.85, linewidth = 0.6) +
+  facet_wrap(~ value_category, scales = "free_y", ncol = 2) +
+  scale_fill_brewer(palette = "Set2", guide = "none") +
+  labs(
+    title = "wastewater viral load across wave phases",
+    subtitle = "Phase definition based on short-term viral load trends",
+    x = "Wave phase",
+    y = expression(sqrt("value_mean7d"))
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    strip.text = element_text(face = "bold"),
+    panel.spacing = unit(1, "lines")
+  )
+```
+
+**Interpretation**
+
+When we look at the three phases, we can clearly see differences in viral load. Before the onset, the values are low and do not change much. During the growth phase, the viral load goes up and the wave starts to build. In the high-load phase, the values are highest and stay high for a while.
+
+For seasonal viruses like **Influenza A**, **Influenza B** and **RSV**, this pattern is very clear and fits well with how these waves usually look. For **SARS-CoV-2**, the change between phases is slower and less sharp, which matches its more continuous circulation.
+
+Overall, this simple phase-based view helps to describe the different parts of a wave without adding another detection step.
+
+### Temperature by wave phase
+
+```{r temperature-by-wave-phase, fig.width=11, fig.height=6.5, dpi=300}
+ggplot(
+  wave_phase_df,
+  aes(x = wave_phase, y = temperature_lag7, fill = wave_phase)
+) +
+  geom_boxplot(alpha = 0.85, linewidth = 0.6) +
+  facet_wrap(~ value_category, ncol = 2) +
+  scale_fill_brewer(palette = "Set2", guide = "none") +
+  labs(
+    title = "Lagged temperature across wave phases",
+    subtitle = "7-day lagged temperature by viral circulation phase",
+    x = "Wave phase",
+    y = "Temperature (°C), lagged by 7 days"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    strip.text = element_text(face = "bold"),
+    panel.spacing = unit(1, "lines")
+  )
+```
+
+**Interpretation**
+
+For **Influenza A**, **Influenza B** and **RSV**, the onset phase usually happens when temperatures are lower than in the pre-onset phase. This fits with what we saw before: colder weather seems to support viral growth, especially at the beginning of a wave.
+
+For **SARS-CoV-2**, the temperature differences between the phases are much smaller. This matches its weaker seasonal behaviour compared to the other viruses.
+
+The results suggest that temperature is more important when seasonal viruses move from pre-onset into the onset phase. Once the viral load is already high, the influence of temperature becomes less clear.
+
+# Forward-Looking Interpretation: Future Wave Onsets Using Past Timing Patterns
+
+Up to this point, we only looked at what already happened in the data. We analysed how viral load changes over time, how it looks across seasons, how it is related to weather, and when wave onsets happened in the past.
+
+In this last part, we use this information to look ahead. We do not predict exact dates. Instead, we show when during the year new waves usually start, based on what we observed before.
+
+Because the dataset only covers two years, exact prediction models would not be reliable. For this reason, we use a simple, scenario-based approach. Past onset timings are mapped to a typical year using the day of the year. This results in time windows where new waves are more likely to begin (`onset_windows`).
+
+The results are shown separately for each virus. This helps to describe typical onset timing and how much it varies, and to compare seasonal patterns across viruses, without claiming exact future dates.
+
+For this analysis, we prepared the onset timing data so that each row represents the start of a detected onset zone, expressed as a day of the year.
+
+```{r onset-timing-preparation, message=FALSE}
+onset_calendar_df <- zones_all %>%
+  mutate(onset_doy = yday(zone_start))
+```
+
+We summarize the onset times within one year for each virus and use this to create a time window.
+
+```{r onset-window-definition, message=FALSE}
+onset_windows <- onset_calendar_df %>%
+  group_by(virus) %>%
+  summarise(
+    window_start = min(onset_doy),
+    window_end   = max(onset_doy),
+    n_onsets = n(),
+    .groups = "drop"
+  )
+```
+
+Then visualize the onset timing within a typical year.
+
+```{r onset-window-visualization, message=FALSE, fig.width=10, fig.height=5.5}
+
+virus_colors <- c(
+  "Influenza A" = "#1b9e77",
+  "Influenza B" = "#7570b3",
+  "RSV"         = "#e7298a",
+  "SARS-CoV-2"  = "#d95f02"
+)
+
+ggplot(onset_windows, aes(y = virus)) +
+
+  geom_rect(
+    aes(
+      xmin = window_start,
+      xmax = window_end,
+      ymin = as.numeric(factor(virus)) - 0.3,
+      ymax = as.numeric(factor(virus)) + 0.3,
+      fill = virus
+    ),
+    alpha = 0.6
+  ) +
+
+  scale_fill_manual(values = virus_colors, guide = "none") +
+
+  scale_x_continuous(
+    limits = c(1, 365),
+    breaks = c(1, 60, 120, 180, 240, 300, 365),
+    labels = c("Jan", "Mar", "May", "Jul", "Sep", "Nov", "Dec")
+  ) +
+
+  labs(
+    title = "Plausible onset windows for wastewater viral waves",
+    subtitle = "Scenario-based timing derived from past onset patterns",
+    x = "Months of the year",
+    y = "Virus"
+  ) +
+
+  theme_minimal(base_size = 12)
+```
+
+**Interpretation**
+
+The figure shows when viral waves usually start during the year. The windows are based on past onset timings and are shown on a typical calendar year. They do not show exact dates, but periods of the year when new waves are more likely to begin.
+
+For **Influenza A** and **RSV**, the onset windows are clearly concentrated in late autumn and early winter. This shows a strong seasonal pattern. If future conditions are similar to those in the data, new waves for these viruses are most likely to start in this winter period. The windows are relatively narrow, which means that onset timing does not vary much between seasons.
+
+For the other two viruses, it is not that clear: For **SARS-CoV-2**, the onset window is much broader and covers a large part of the year. This shows a weaker seasonal pattern. Wave onsets seem to be driven less by seasonal conditions. As a result, SARS-CoV-2 onsets are less predictable and not limited to one specific season.
+
+For **Influenza B**, no clear onset window can be identified in our plot. This is because only very few onset events were detected in the data. As a result, no stable seasonal pattern can be derived for Influenza B, and no meaningful onset window can be shown.
+
+Given the small number of detected onset events, these windows should be interpreted as illustrative rather than statistically robust estimates.
+
+# Conclusion
+
+This project analysed wastewater viral load data in the city of Zurich to see if weather conditions influence viral concentrations in wastewater. The analysis is limited by the relatively short observation period of two years. This restricts the ability to draw conclusions about long-term climate effects or rare extreme weather events. In addition, behavioural and epidemiological factors such as immunity levels or vaccination coverage were not included in the models. Wastewater measurements were combined with daily temperature data and rain duration data from the Ostluft platform.
+
+The analysis showed clear seasonal patterns for Influenza A, Influenza B, and RSV. These viruses had strong peaks in winter and very low levels in summer. SARS-CoV-2 behaved differently. It was present during the whole year and showed several peaks outside the winter season. This suggests a weaker seasonal pattern.
+
+In the exploratory analysis and the lag analysis, temperature showed a clear relationship with viral load for the seasonal viruses. Higher viral concentrations were mainly observed when temperatures were low, especially in winter. Rain duration did not show a clear relationship with viral load. This was also the case when the analysis was limited to winter months only.
+
+To better separate seasonal effects from short-term weather effects, we used Generalized Additive Models (GAMs). The results showed that temperature mainly influences viral load within the season, but does not trigger new waves on its own (for example on cold days in summer). Rain duration did not show a stable independent effect once long-term trends over time were taken into account. For SARS-CoV-2, weather effects were generally weaker, which fits with its year-round circulation.
+
+We also used a wave onset detection approach to identify periods of sustained viral growth before major peaks. These onset zones appeared consistently before observed outbreaks. Clear differences were visible between the seasonal viruses and SARS-CoV-2. Seasonal viruses showed compact and rather predictable onset periods in winter, while SARS-CoV-2 showed more variable onset timing across the year.
+
+Instead of predicting exact outbreak dates, this project follows a scenario-based and period-oriented approach. With more data, additional variables, and models designed for forecasting, wastewater data could be used to define time periods when new waves are more likely to start. This is more realistic than trying to predict exact dates and could support public health monitoring and early warning systems. In practice, such period-based onset windows could support targeted preparedness planning, for example by informing testing strategies, hospital capacity planning, or public communication timing.
+
+For the coding part of this project, ChatGPT was mainly used as a support tool. It helped with writing code and improving the visual appearance of the plots, for example by making them clearer and easier to read. The ideas, research questions, and overall structure of the analysis were developed by us. All methodological decisions and interpretations were our own. ChatGPT was also used to help with writing, language and grammar, especially when working in R Markdown, where such issues are harder to notice. In addition, it was used to check whether the structure of the R Markdown document was set up correctly, for example the order of chapters and subchapters.
+
+Overall, this project shows that wastewater data can capture viral seasonality and epidemic dynamics well. Temperature plays an important role in increasing viral circulation during winter, while rain duration seems to have little influence. A period-based and scenario-oriented interpretation is therefore more robust than trying to predict exact future outbreak dates.
+
+# References
+
+Eawag. (n.d.). Monitoring infectious diseases and drug use. https://www.eawag.ch/en/research/humanwelfare/wastewater/
+
+Federal Office of Public Health (FOPH). (n.d.). Wastewater monitoring system. https://www.idd.bag.admin.ch/survey-systems/waste-water
+
+GeeksforGeeks. (2025, July 23). What is lag in time series forecasting? https://www.geeksforgeeks.org/machine-learning/what-is-lag-in-time-series-forecasting/
+
+Open Data Portal Switzerland. (2026, February 11). Respiratory viruses in wastewater. https://opendata.swiss/de/dataset/respiratorische-viren1
+
+Ostluft. (n.d.). Air quality and meteorological measurement data. https://daten.ostluft.ch/index.php?id=datenabfragen
