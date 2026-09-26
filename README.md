@@ -21,19 +21,14 @@ The project combines wastewater data with weather data. We first conduct simple 
 
 Before proceeding, it is assumed that the R Markdown file is located in the scripts folder and the datasets are stored in the project folder named data. For loading, the datasets are using the relative path. For example: ../data/RESPVIRUSES_wastewater.csv
 
-project-root/
-│
+weather-wastewater-zurich/
+├── README.md
 ├── data/
 │   ├── RESPVIRUSES_wastewater.csv
 │   ├── OSTLUFT_Rain_duration_Measurements_2023-2026.xlsx
 │   └── OSTLUFT_Temperature_Measurements_2023-2026.xlsx
-│
-├── scripts/
-│   └── Weather_Effects_Wastewater_Viral_Load_Zurich.Rmd 
-│
-└── Declaration_of_Originality_Group2.pdf
-└── ReadMe.txt
-└── Team_Agreement_Group2.pdf
+└── scripts/
+    └── Weather_Effects_Wastewater_Viral_Load_Zurich.Rmd
 
 The two additional files named Declaration_of_Originality_Group2.pdf and Team_Agreement_Group2.pdf are not required to run or load the project. They are included only for formal reasons, as they attest that the work was completed independently and outline the team agreement.
 
