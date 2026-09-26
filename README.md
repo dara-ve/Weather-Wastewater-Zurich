@@ -2,13 +2,15 @@
 
 **Analysis of weather effects on respiratory virus concentrations in Zurich wastewater using R.**
 
-*R-Bootcamp Data Analysis Project*
+*R-Bootcamp Data Analysis Project · MSc Applied Information and Data Science*
 
 ## Overview
 
-This project was created as part of the R-Bootcamp in the MSc Applied Information and Data Science program and demonstrates applied data analysis, modelling, and visualisation skills using real-world public health and weather data.
+This project investigates whether weather conditions, specifically air temperature and rain duration, are associated with changes in respiratory virus concentrations measured in Zurich wastewater.
 
-The goal of the project is to analyse wastewater viral load data from Zurich and examine whether weather conditions, specifically air temperature and rain duration, are associated with changes in measured viral concentrations.
+The analysis combines public health and weather data and applies exploratory data analysis, lagged weather analysis, Generalized Additive Models (GAMs), and wave onset detection to examine seasonal patterns and short-term weather associations.
+
+The project was developed as part of the R-Bootcamp in the MSc Applied Information and Data Science program and demonstrates a reproducible data analysis workflow using R and R Markdown.
 
 The analysis focuses on four respiratory viruses:
 
